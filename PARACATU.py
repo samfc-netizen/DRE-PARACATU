@@ -501,7 +501,22 @@ date_ini, date_fim = st.sidebar.date_input(
 )
 date_ini = pd.Timestamp(date_ini) if date_ini else None
 date_fim = pd.Timestamp(date_fim) if date_fim else None
+
+# Filtro adicional por mês (mantém o calendário)
+meses_sel = st.sidebar.multiselect(
+    "Meses (opcional)",
+    options=[MES_NUM_TO_PT[m] for m in range(1, 13)],
+    default=[],
+)
+
+# Meses exibidos: interseção do período do calendário com os meses selecionados (se houver)
 meses_exib = _date_filter_to_months(date_ini, date_fim, int(ano_ref))
+if meses_sel:
+    meses_exib = [m for m in meses_exib if MES_NUM_TO_PT[m] in set(meses_sel)]
+    if not meses_exib:
+        # se o usuário selecionar meses fora do período do calendário, respeita os meses selecionados
+        meses_exib = [MES_PT_TO_NUM[x] for x in meses_sel]
+
 
 st.sidebar.caption(f"Meses exibidos: **{', '.join(MES_NUM_TO_PT[m] for m in meses_exib)}**")
 
@@ -897,7 +912,7 @@ else:
     st.divider()
 
     with st.expander("Comparativo Ano-1 por mês (abrir/fechar)", expanded=False):
-        meses_periodo = sorted(base_cur["_dt"].dt.month.unique().tolist()) if not base_cur.empty else meses_exib
+        meses_periodo = list(meses_exib)
         cur_m = base_cur.groupby(base_cur["_dt"].dt.month)["_receita"].sum()
         y1_m = base_y1.groupby(base_y1["_dt"].dt.month)["_receita"].sum()
 
@@ -909,8 +924,8 @@ else:
             dif_p = ((v_cur / v_y1 - 1) * 100.0) if v_y1 != 0 else (100.0 if v_cur != 0 else 0.0)
             rows.append({
                 "MÊS": MESES_FULL.get(int(m), str(m)),
-                "ANO-1": v_y1,
-                "ANO ATUAL": v_cur,
+                f"{int(ano_ref)-1}": v_y1,
+                f"{int(ano_ref)}": v_cur,
                 "DIF (R$)": dif_r,
                 "DIF (%)": dif_p,
             })
@@ -920,7 +935,7 @@ else:
             st.info("Sem dados no período selecionado.")
         else:
             show = t.copy()
-            for col in ["ANO-1", "ANO ATUAL", "DIF (R$)"]:
+            for col in [str(int(ano_ref)-1), str(int(ano_ref)), "DIF (R$)"]:
                 show[col] = show[col].apply(lambda x: f"R$ {format_brl(x)}")
             show["DIF (%)"] = show["DIF (%)"].apply(fmt_pct)
             st.dataframe(show, use_container_width=True, hide_index=True)
@@ -1105,3 +1120,42 @@ else:
                     st.dataframe(show_mc, use_container_width=True, hide_index=True)
                 else:
                     st.info("Coluna MARCA não encontrada.")
+
+
+    st.divider()
+    st.subheader("Evolução de clientes (por mês)")
+
+    if base_cur.empty or "CLIENTE" not in base_cur.columns:
+        st.info("Sem dados no período selecionado ou coluna CLIENTE não encontrada.")
+    else:
+        meses_cols = list(meses_exib) if meses_exib else list(range(1, 13))
+        meses_names = [MESES_FULL[m] for m in meses_cols]
+
+        tmp = base_cur.copy()
+        tmp["MES"] = tmp["_dt"].dt.month
+
+        piv = (tmp.pivot_table(index="CLIENTE", columns="MES", values="_receita", aggfunc="sum", fill_value=0.0)
+               .reindex(columns=meses_cols, fill_value=0.0))
+
+        piv.columns = [MESES_FULL[int(c)] for c in piv.columns]
+        piv = piv.reset_index()
+
+        piv["_TOTAL"] = piv[meses_names].sum(axis=1)
+        piv = piv.sort_values("_TOTAL", ascending=False).drop(columns=["_TOTAL"])
+
+        topn = 30
+        top = piv.head(topn).copy()
+
+        def _format_tbl(df_show: pd.DataFrame) -> pd.DataFrame:
+            out = df_show.copy()
+            for c in meses_names:
+                if c in out.columns:
+                    out[c] = out[c].apply(lambda x: f"R$ {format_brl(x)}")
+            return out
+
+        st.caption(f"Mostrando Top {topn} clientes por faturamento no período. (Zerado quando não há vendas no mês.)")
+        st.dataframe(_format_tbl(top), use_container_width=True, hide_index=True)
+
+        if len(piv) > topn:
+            with st.expander("Ver todos os clientes (tabela completa)", expanded=False):
+                st.dataframe(_format_tbl(piv), use_container_width=True, hide_index=True)
