@@ -1,15 +1,11 @@
 # PARACATU.py
-# Streamlit dashboard (DRE + DFC) para "projeto Paracatu.xlsx"
+# Dashboard Streamlit (DRE + DFC + Indicador de Compras + Indicadores Comerciais)
 #
-# Implementações:
-# - 1 tabela por página
-# - Colunas JAN | JAN% | ... | DEZ | DEZ% + ACUM | ACUM%
-# - Shift (mês seguinte) para 00024 (Pessoal) e 00021 (Deduções) na DRE
-# - Drill por linha (todas as linhas) + detalhamento de despesas (DESPESA/HISTÓRICO/FAVORECIDO)
-# - Linhas extras:
-#   * DRE: RESULTADO antes das Desp financeiras e RETIRADAS = RESULTADO OPERACIONAL + INVESTIMENTOS/RETIRADAS + DESPESAS FINANCEIRAS
-#   * DFC: SALDO OPERACIONAL antes das Desp financeiras e RETIRADAS = SALDO OPERACIONAL + DESPESAS FINANCEIRAS + INVESTIMENTOS/RETIRADAS
-# - Coloração: valores de linhas de RESULTADO/SALDO em azul quando positivo e vermelho quando negativo
+# Abas esperadas no Excel:
+# - RECEITA E CMV   (colunas mínimas: DATA, VR.TOTAL, CUSTO; demais colunas usadas nos indicadores comerciais: CLIENTE, SEGMENTO, MARCA, LINHA, etc.)
+# - DRE             (colunas mínimas: DTA.PAG, CONTA DE RESULTADO, VAL.PAG; e para drill: DESPESA, FAVORECIDO, HISTÓRICO, DUPLICATA)
+# - RECEBIMENTOS    (colunas mínimas: MÊS, ANO, VALOR)
+# - Compras fornecedor (colunas mínimas: DATA, FORNECEDOR, VR. CONTÁBIL)
 #
 # Requisitos (requirements.txt):
 # streamlit
@@ -23,9 +19,10 @@ import glob
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import streamlit as st
+import plotly.express as px
 
 
 # =========================
@@ -49,6 +46,11 @@ MES_LONG_TO_NUM = {
     "NOVEMBRO": 11, "NOV": 11,
     "DEZEMBRO": 12, "DEZ": 12,
 }
+MESES_FULL = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
+    7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"
+}
+MESES_FULL_INV = {v: k for k, v in MESES_FULL.items()}
 
 
 # =========================
@@ -119,7 +121,7 @@ def excel_signature(path: str) -> Tuple[int, int]:
 
 
 def _auto_find_excel() -> Optional[str]:
-    preferred = ["projeto Paracatu.xlsx", "PROJETO PARACATU.xlsx", "Paracatu.xlsx"]
+    preferred = ["projeto Paracatu.xlsx", "PROJETO PARACATU.xlsx", "Paracatu.xlsx", "PARACATU.xlsx"]
     for fn in preferred:
         if os.path.exists(fn):
             return fn
@@ -155,6 +157,11 @@ def prep_receita_cmv(excel_path: str, sig: Tuple[int, int]) -> Optional[pd.DataF
     r["_mes"] = r["_dt"].dt.month
     r["_receita"] = r.get("VR.TOTAL").apply(to_num) if "VR.TOTAL" in r.columns else 0.0
     r["_cmv"] = r.get("CUSTO").apply(to_num) if "CUSTO" in r.columns else 0.0
+
+    # normaliza texto das colunas comerciais se existirem
+    for c in ["CLIENTE", "SEGMENTO", "MARCA", "LINHA", "VENDEDOR", "CIDADE"]:
+        if c in r.columns:
+            r[c] = r[c].astype(str).str.strip()
     return r
 
 
@@ -170,7 +177,7 @@ def prep_dre_lancamentos(excel_path: str, sig: Tuple[int, int]) -> Optional[pd.D
     d["_mes"] = d["_dt"].dt.month
     d["_v"] = d.get("VAL.PAG").apply(to_num) if "VAL.PAG" in d.columns else 0.0
 
-    for c in ["CONTA DE RESULTADO", "DESPESA", "FAVORECIDO", "HISTÓRICO"]:
+    for c in ["CONTA DE RESULTADO", "DESPESA", "FAVORECIDO", "HISTÓRICO", "DUPLICATA"]:
         if c in d.columns:
             d[c] = d[c].astype(str).str.strip()
     return d
@@ -190,6 +197,7 @@ def prep_recebimentos(excel_path: str, sig: Tuple[int, int]) -> Optional[pd.Data
     r["_mes"] = r["_mes"].astype(int)
     return r
 
+
 @st.cache_data(show_spinner=False)
 def prep_compras_fornecedor(excel_path: str, sig: Tuple[int, int]) -> Optional[pd.DataFrame]:
     df = read_sheet(excel_path, "Compras fornecedor", sig)
@@ -200,20 +208,17 @@ def prep_compras_fornecedor(excel_path: str, sig: Tuple[int, int]) -> Optional[p
     c = c[c["_dt"].notna()].copy()
     c["_ano"] = c["_dt"].dt.year
     c["_mes"] = c["_dt"].dt.month
-    # valor
     if "VR. CONTÁBIL" in c.columns:
         c["_v"] = c["VR. CONTÁBIL"].apply(to_num)
     elif "VR.CONTÁBIL" in c.columns:
         c["_v"] = c["VR.CONTÁBIL"].apply(to_num)
     else:
         c["_v"] = 0.0
-    # fornecedor
     if "FORNECEDOR" in c.columns:
         c["FORNECEDOR"] = c["FORNECEDOR"].astype(str).str.strip()
     else:
         c["FORNECEDOR"] = "—"
     return c
-
 
 
 def month_series(df: pd.DataFrame, val_col: str, ano: int, meses: List[int]) -> Dict[int, float]:
@@ -288,17 +293,14 @@ def make_dre_table(
     for nome, by_m, prefix in despesas_map_by_month:
         for m in range(1, 13):
             desp_total_by_month[m] += float(by_m.get(m, 0.0))
-            if prefix == "00022":  # investimentos/retiradas
+            if prefix == "00022":
                 inv_by_month[m] = float(by_m.get(m, 0.0))
-            if prefix == "00023":  # despesas financeiras
+            if prefix == "00023":
                 fin_by_month[m] = float(by_m.get(m, 0.0))
 
     resultado_oper_by_month = {m: float(margem_by_month.get(m, 0.0)) - float(desp_total_by_month.get(m, 0.0)) for m in range(1, 13)}
-
-    # NOVA LINHA solicitada: resultado antes de fin/retiradas (soma de volta)
     resultado_antes_fin_ret_by_month = {m: float(resultado_oper_by_month[m]) + float(inv_by_month[m]) + float(fin_by_month[m]) for m in range(1, 13)}
 
-    # Ordem das linhas
     linhas: List[Tuple[str, Dict[int, float], str]] = []
     linhas.append(("RECEITA", receita_by_month, "currency"))
     linhas.append(("CMV", cmv_by_month, "currency"))
@@ -306,6 +308,8 @@ def make_dre_table(
     linhas.append(("MARKUP", markup_by_month, "ratio"))
     for nome, by_m, _p in despesas_map_by_month:
         linhas.append((nome, by_m, "currency"))
+
+    # ORDEM solicitada: "antes..." primeiro, depois "operacional"
     linhas.append(("RESULTADO antes das Desp financeiras e RETIRADAS", resultado_antes_fin_ret_by_month, "currency"))
     linhas.append(("RESULTADO OPERACIONAL", resultado_oper_by_month, "currency"))
 
@@ -359,14 +363,14 @@ def make_dfc_table(
                 fin_by_month[m] = float(by_m.get(m, 0.0))
 
     saldo_by_month = {m: float(receb_by_month.get(m, 0.0)) - float(saidas_total.get(m, 0.0)) for m in range(1, 13)}
-
-    # NOVA LINHA solicitada (add back fin/retiradas)
     saldo_antes_fin_ret_by_month = {m: float(saldo_by_month[m]) + float(fin_by_month[m]) + float(inv_by_month[m]) for m in range(1, 13)}
 
     linhas: List[Tuple[str, Dict[int, float], str]] = []
     linhas.append(("RECEBIMENTOS", receb_by_month, "currency"))
     for nome, by_m, _p in saidas_map_by_month:
         linhas.append((nome, by_m, "currency"))
+
+    # ORDEM solicitada: "antes..." primeiro, depois "saldo"
     linhas.append(("SALDO OPERACIONAL antes das Desp financeiras e RETIRADAS", saldo_antes_fin_ret_by_month, "currency"))
     linhas.append(("SALDO OPERACIONAL", saldo_by_month, "currency"))
 
@@ -396,28 +400,25 @@ def make_dfc_table(
 
 def style_table(df: pd.DataFrame, meses_exib: List[int], highlight_rows: List[str]) -> "pd.io.formats.style.Styler":
     """
-    Compatível com pandas antigos (sem .hide_columns).
+    Compatível com pandas antigos.
     - Formata valores em R$ (exceto MARKUP, que é numérico).
     - Formata percentuais em % (MARKUP% vira "—").
-    - Colore linhas de resultado/saldo: azul se positivo, vermelho se negativo (por mês e ACUM).
+    - Colore linhas destacadas: azul se positivo, vermelho se negativo.
     """
     cols_value = [MES_NUM_TO_PT[m] for m in meses_exib] + ["ACUM"]
     cols_pct = [f"{MES_NUM_TO_PT[m]}%" for m in meses_exib] + ["ACUM%"]
     cols_all = ["LINHA"] + sum([[MES_NUM_TO_PT[m], f"{MES_NUM_TO_PT[m]}%"] for m in meses_exib], []) + ["ACUM", "ACUM%"]
 
     base = df[cols_all + ["_type"]].copy()
-    num_base = base.copy()  # para regras de cor
+    num_base = base.copy()
 
-    # Constrói DataFrame já formatado (strings) para exibição
     show = base[cols_all].copy()
 
     for i in show.index:
-        linha = str(show.loc[i, "LINHA"])
         typ = str(base.loc[i, "_type"])
-
         for c in cols_value:
             v = num_base.loc[i, c]
-            if typ == "ratio":  # MARKUP
+            if typ == "ratio":
                 try:
                     show.loc[i, c] = f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 except Exception:
@@ -434,17 +435,12 @@ def style_table(df: pd.DataFrame, meses_exib: List[int], highlight_rows: List[st
 
     sty = show.style
 
-    # Coloração nas linhas destacadas
     def _row_style(row):
-        linha = str(row["LINHA"])
         styles = [""] * len(row.index)
-        if linha not in highlight_rows:
+        if str(row["LINHA"]) not in highlight_rows:
             return styles
-
-        # pinta apenas colunas de valores (meses + ACUM)
         for j, col in enumerate(row.index):
             if col in cols_value:
-                # valor numérico correspondente
                 try:
                     v = float(num_base.loc[row.name, col])
                 except Exception:
@@ -455,8 +451,7 @@ def style_table(df: pd.DataFrame, meses_exib: List[int], highlight_rows: List[st
                     styles[j] = "color: red; font-weight: 700;"
         return styles
 
-    sty = sty.apply(_row_style, axis=1)
-    return sty
+    return sty.apply(_row_style, axis=1)
 
 
 # =========================
@@ -466,7 +461,7 @@ st.set_page_config(page_title="Indicadores Paracatu (DRE/DFC)", layout="wide")
 
 excel_path = _auto_find_excel()
 if not excel_path:
-    st.error("Não encontrei nenhum Excel (.xlsx/.xlsm/.xls) na pasta do app. Coloque o 'projeto Paracatu.xlsx' junto do .py.")
+    st.error("Não encontrei nenhum Excel (.xlsx/.xlsm/.xls) na pasta do app. Coloque o Excel junto do .py (ex.: 'projeto Paracatu.xlsx').")
     st.stop()
 
 sig = excel_signature(excel_path)
@@ -484,8 +479,7 @@ if df_rcm is None or df_dre is None or df_rec is None:
     st.error(f"Falha ao ler abas obrigatórias: {', '.join(faltas)}")
     st.stop()
 
-# Compras fornecedor é opcional (só usado na página INDICADOR DE COMPRAS)
-
+# Sidebar
 st.sidebar.title("Filtros")
 
 anos = sorted(set(df_rcm["_ano"].dropna().astype(int).unique().tolist()) |
@@ -511,7 +505,7 @@ meses_exib = _date_filter_to_months(date_ini, date_fim, int(ano_ref))
 
 st.sidebar.caption(f"Meses exibidos: **{', '.join(MES_NUM_TO_PT[m] for m in meses_exib)}**")
 
-pagina = st.sidebar.radio("Página", ["DRE", "DFC", "INDICADOR DE COMPRAS"], index=0)
+pagina = st.sidebar.radio("Página", ["DRE", "DFC", "INDICADOR DE COMPRAS", "INDICADORES COMERCIAIS"], index=0)
 
 
 # =========================
@@ -546,11 +540,8 @@ if pagina == "DRE":
     highlight_rows = ["RESULTADO OPERACIONAL", "RESULTADO antes das Desp financeiras e RETIRADAS"]
 
     st.subheader("Tabela DRE")
-    st.dataframe(style_table(dre_tbl, meses_exib, highlight_rows), use_container_width=True)
+    st.dataframe(style_table(dre_tbl, meses_exib, highlight_rows), use_container_width=True, hide_index=True)
 
-    # =========================
-    # Drill (todas as linhas)
-    # =========================
     st.divider()
     st.subheader("Drill — Por linha (todas as linhas)")
 
@@ -581,9 +572,6 @@ if pagina == "DRE":
         c2.metric("Média mensal (período)", f"R$ {format_brl(media)}")
         c3.metric("% sobre Receita (período)", fmt_pct(pct_receita))
 
-    # =========================
-    # Drill despesas (somente se for linha de despesa mapeada)
-    # =========================
     st.divider()
     st.subheader("Drill — Detalhamento (DESPESA / HISTÓRICO / FAVORECIDO)")
 
@@ -703,7 +691,7 @@ elif pagina == "DFC":
     highlight_rows = ["SALDO OPERACIONAL", "SALDO OPERACIONAL antes das Desp financeiras e RETIRADAS"]
 
     st.subheader("Tabela DFC")
-    st.dataframe(style_table(dfc_tbl, meses_exib, highlight_rows), use_container_width=True)
+    st.dataframe(style_table(dfc_tbl, meses_exib, highlight_rows), use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("Drill — Por linha (todas as linhas)")
@@ -800,56 +788,41 @@ elif pagina == "DFC":
 # =========================
 # INDICADOR DE COMPRAS
 # =========================
-else:
+elif pagina == "INDICADOR DE COMPRAS":
     st.title("INDICADOR DE COMPRAS")
 
     if df_comp is None:
         st.error("A aba 'Compras fornecedor' não foi encontrada ou não pôde ser lida. Verifique o nome da aba no Excel.")
         st.stop()
 
-    # séries mensais
     cmv_by_month = month_series(df_rcm, "_cmv", int(ano_ref), meses_exib)
     compras_by_month = month_series(df_comp, "_v", int(ano_ref), meses_exib)
     diff_by_month = {m: float(cmv_by_month.get(m, 0.0)) - float(compras_by_month.get(m, 0.0)) for m in range(1, 13)}
 
-    # Tabela com meses por extenso + ACUM
-    meses_full = {
-        1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
-        7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"
-    }
-
-    cols = ["LINHA"] + [meses_full[m] for m in meses_exib] + ["ACUM"]
-    rows = []
+    cols = ["LINHA"] + [MESES_FULL[m] for m in meses_exib] + ["ACUM"]
 
     def _row(nome, by_month):
         r = {"LINHA": nome}
         acum = 0.0
         for m in meses_exib:
             v = float(by_month.get(m, 0.0))
-            r[meses_full[m]] = v
+            r[MESES_FULL[m]] = v
             acum += v
         r["ACUM"] = acum
         return r
 
-    rows.append(_row("CMV NECESSIDADE", cmv_by_month))
-    rows.append(_row("COMPRAS REALIZADO", compras_by_month))
-    rows.append(_row("DIFERENÇA (CMV - COMPRAS)", diff_by_month))
+    tbl = pd.DataFrame([
+        _row("CMV NECESSIDADE", cmv_by_month),
+        _row("COMPRAS REALIZADO", compras_by_month),
+        _row("DIFERENÇA (CMV - COMPRAS)", diff_by_month),
+    ])[cols]
 
-    tbl = pd.DataFrame(rows)[cols]
-
-    # Styler com R$ e cor na linha Diferença
     num_tbl = tbl.copy()
-
-    def _fmt_brl(v):
-        return f"R$ {format_brl(v)}"
-
     show = tbl.copy()
     for c in cols[1:]:
-        show[c] = show[c].apply(lambda x: _fmt_brl(x))
+        show[c] = show[c].apply(lambda x: f"R$ {format_brl(x)}")
 
     sty = show.style
-
-    diff_idx = show.index[show["LINHA"] == "DIFERENÇA (CMV - COMPRAS)"].tolist()
 
     def _row_style(row):
         styles = [""] * len(row.index)
@@ -868,22 +841,15 @@ else:
                 styles[j] = "color: red; font-weight: 700;"
         return styles
 
-    sty = sty.apply(_row_style, axis=1)
-
     st.subheader("Tabela — CMV x Compras")
-    st.dataframe(sty, use_container_width=True, hide_index=True)
+    st.dataframe(sty.apply(_row_style, axis=1), use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("Drill — Compras por fornecedor")
 
-    mes_opt = ["TODOS"] + [meses_full[m] for m in meses_exib]
+    mes_opt = ["TODOS"] + [MESES_FULL[m] for m in meses_exib]
     mes_sel = st.selectbox("Mês (opcional)", options=mes_opt, index=0, key="compras_mes_sel")
-
-    if mes_sel == "TODOS":
-        meses_drill = meses_exib
-    else:
-        inv = {v: k for k, v in meses_full.items()}
-        meses_drill = [inv[mes_sel]]
+    meses_drill = meses_exib if mes_sel == "TODOS" else [MESES_FULL_INV[mes_sel]]
 
     base = df_comp[(df_comp["_ano"] == int(ano_ref)) & (df_comp["_mes"].isin(meses_drill))].copy()
     total = float(base["_v"].sum())
@@ -899,6 +865,243 @@ else:
         show2 = agg.copy()
         show2["Valor"] = show2["Valor"].apply(lambda x: f"R$ {format_brl(x)}")
         show2["% Participação"] = show2["% Participação"].apply(fmt_pct)
-
         st.dataframe(show2, use_container_width=True, hide_index=True)
 
+
+# =========================
+# INDICADORES COMERCIAIS
+# =========================
+else:
+    st.title("INDICADORES COMERCIAIS")
+
+    start = pd.Timestamp(date_ini) if date_ini is not None else pd.Timestamp(year=int(ano_ref), month=1, day=1)
+    end = pd.Timestamp(date_fim) if date_fim is not None else pd.Timestamp(year=int(ano_ref), month=12, day=31)
+    if end < start:
+        start, end = end, start
+
+    base_cur = df_rcm[(df_rcm["_dt"] >= start) & (df_rcm["_dt"] <= end)].copy()
+
+    start_y1 = start - pd.DateOffset(years=1)
+    end_y1 = end - pd.DateOffset(years=1)
+    base_y1 = df_rcm[(df_rcm["_dt"] >= start_y1) & (df_rcm["_dt"] <= end_y1)].copy()
+
+    fat_cur = float(base_cur["_receita"].sum())
+    fat_y1 = float(base_y1["_receita"].sum())
+    crescimento_pct = ((fat_cur / fat_y1 - 1) * 100.0) if fat_y1 != 0 else (100.0 if fat_cur != 0 else 0.0)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Faturamento (período)", f"R$ {format_brl(fat_cur)}")
+    c2.metric("Faturamento Ano-1 (mesmo período)", f"R$ {format_brl(fat_y1)}")
+    c3.metric("Crescimento", fmt_pct(crescimento_pct))
+
+    st.divider()
+
+    with st.expander("Comparativo Ano-1 por mês (abrir/fechar)", expanded=False):
+        meses_periodo = sorted(base_cur["_dt"].dt.month.unique().tolist()) if not base_cur.empty else meses_exib
+        cur_m = base_cur.groupby(base_cur["_dt"].dt.month)["_receita"].sum()
+        y1_m = base_y1.groupby(base_y1["_dt"].dt.month)["_receita"].sum()
+
+        rows = []
+        for m in meses_periodo:
+            v_cur = float(cur_m.get(m, 0.0))
+            v_y1 = float(y1_m.get(m, 0.0))
+            dif_r = v_cur - v_y1
+            dif_p = ((v_cur / v_y1 - 1) * 100.0) if v_y1 != 0 else (100.0 if v_cur != 0 else 0.0)
+            rows.append({
+                "MÊS": MESES_FULL.get(int(m), str(m)),
+                "ANO-1": v_y1,
+                "ANO ATUAL": v_cur,
+                "DIF (R$)": dif_r,
+                "DIF (%)": dif_p,
+            })
+
+        t = pd.DataFrame(rows)
+        if t.empty:
+            st.info("Sem dados no período selecionado.")
+        else:
+            show = t.copy()
+            for col in ["ANO-1", "ANO ATUAL", "DIF (R$)"]:
+                show[col] = show[col].apply(lambda x: f"R$ {format_brl(x)}")
+            show["DIF (%)"] = show["DIF (%)"].apply(fmt_pct)
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.subheader("Faturamento por mês")
+    if base_cur.empty:
+        st.info("Sem dados para o período selecionado.")
+    else:
+        bar = (base_cur.assign(MES=base_cur["_dt"].dt.month)
+               .groupby("MES")["_receita"].sum()
+               .reindex(range(1, 13), fill_value=0.0)
+               .reset_index())
+        bar["MÊS"] = bar["MES"].map(MESES_FULL)
+        fig_bar = px.bar(bar, x="MÊS", y="_receita")
+        fig_bar.update_layout(yaxis_title="Faturamento (R$)", xaxis_title=None)
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.divider()
+    st.subheader("Participação por Segmento")
+    if base_cur.empty or "SEGMENTO" not in base_cur.columns:
+        st.info("Coluna SEGMENTO não encontrada ou sem dados no período.")
+    else:
+        seg = (base_cur.groupby("SEGMENTO", dropna=False)["_receita"].sum()
+               .reset_index().rename(columns={"_receita": "Faturamento"}))
+        seg["SEGMENTO"] = seg["SEGMENTO"].fillna("—").astype(str).str.strip().replace({"": "—"})
+        total_seg = float(seg["Faturamento"].sum())
+        seg["%"] = (seg["Faturamento"] / total_seg * 100.0) if total_seg != 0 else 0.0
+        seg = seg.sort_values("Faturamento", ascending=False)
+
+        fig_pie = px.pie(seg, names="SEGMENTO", values="Faturamento")
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+        show = seg.copy()
+        show["Faturamento"] = show["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+        show["%"] = show["%"].apply(fmt_pct)
+        st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Marcas — Top 10")
+    if base_cur.empty or "MARCA" not in base_cur.columns:
+        st.info("Coluna MARCA não encontrada ou sem dados.")
+    else:
+        mdf = (base_cur.groupby("MARCA", dropna=False)["_receita"].sum()
+               .reset_index().rename(columns={"_receita": "Faturamento"}))
+        mdf["MARCA"] = mdf["MARCA"].fillna("—").astype(str).str.strip().replace({"": "—"})
+        tot = float(mdf["Faturamento"].sum())
+        mdf["%"] = (mdf["Faturamento"] / tot * 100.0) if tot != 0 else 0.0
+        mdf = mdf.sort_values("Faturamento", ascending=False)
+
+        top10 = mdf.head(10).copy()
+        show10 = top10.copy()
+        show10["Faturamento"] = show10["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+        show10["%"] = show10["%"].apply(fmt_pct)
+        st.dataframe(show10, use_container_width=True, hide_index=True)
+
+        with st.expander("Ver todas as marcas", expanded=False):
+            show_all = mdf.copy()
+            show_all["Faturamento"] = show_all["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+            show_all["%"] = show_all["%"].apply(fmt_pct)
+            st.dataframe(show_all, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Drill — Linhas dentro da Marca")
+        marca_sel = st.selectbox("Selecione a marca", options=mdf["MARCA"].tolist(), index=0, key="marca_sel")
+        base_m = base_cur[base_cur["MARCA"].fillna("—").astype(str).str.strip().replace({"": "—"}) == marca_sel].copy()
+        if base_m.empty or "LINHA" not in base_m.columns:
+            st.info("Sem dados para a marca selecionada ou coluna LINHA ausente.")
+        else:
+            ldf = (base_m.groupby("LINHA", dropna=False)["_receita"].sum()
+                   .reset_index().rename(columns={"_receita": "Faturamento"}))
+            ldf["LINHA"] = ldf["LINHA"].fillna("—").astype(str).str.strip().replace({"": "—"})
+            totm = float(ldf["Faturamento"].sum())
+            ldf["% (sobre a marca)"] = (ldf["Faturamento"] / totm * 100.0) if totm != 0 else 0.0
+            ldf = ldf.sort_values("Faturamento", ascending=False)
+
+            showl = ldf.copy()
+            showl["Faturamento"] = showl["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+            showl["% (sobre a marca)"] = showl["% (sobre a marca)"].apply(fmt_pct)
+            st.dataframe(showl, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Linhas — Top 10")
+    if base_cur.empty or "LINHA" not in base_cur.columns:
+        st.info("Coluna LINHA não encontrada ou sem dados.")
+    else:
+        lall = (base_cur.groupby("LINHA", dropna=False)["_receita"].sum()
+                .reset_index().rename(columns={"_receita": "Faturamento"}))
+        lall["LINHA"] = lall["LINHA"].fillna("—").astype(str).str.strip().replace({"": "—"})
+        totl = float(lall["Faturamento"].sum())
+        lall["%"] = (lall["Faturamento"] / totl * 100.0) if totl != 0 else 0.0
+        lall = lall.sort_values("Faturamento", ascending=False)
+
+        top10l = lall.head(10).copy()
+        show10l = top10l.copy()
+        show10l["Faturamento"] = show10l["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+        show10l["%"] = show10l["%"].apply(fmt_pct)
+        st.dataframe(show10l, use_container_width=True, hide_index=True)
+
+        with st.expander("Ver todas as linhas", expanded=False):
+            show_all_l = lall.copy()
+            show_all_l["Faturamento"] = show_all_l["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+            show_all_l["%"] = show_all_l["%"].apply(fmt_pct)
+            st.dataframe(show_all_l, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Drill — Marcas dentro da Linha")
+        linha_sel = st.selectbox("Selecione a linha", options=lall["LINHA"].tolist(), index=0, key="linha_sel")
+        base_l = base_cur[base_cur["LINHA"].fillna("—").astype(str).str.strip().replace({"": "—"}) == linha_sel].copy()
+        if base_l.empty or "MARCA" not in base_l.columns:
+            st.info("Sem dados para a linha selecionada ou coluna MARCA ausente.")
+        else:
+            bdf = (base_l.groupby("MARCA", dropna=False)["_receita"].sum()
+                   .reset_index().rename(columns={"_receita": "Faturamento"}))
+            bdf["MARCA"] = bdf["MARCA"].fillna("—").astype(str).str.strip().replace({"": "—"})
+            totline = float(bdf["Faturamento"].sum())
+            bdf["% (sobre a linha)"] = (bdf["Faturamento"] / totline * 100.0) if totline != 0 else 0.0
+            bdf = bdf.sort_values("Faturamento", ascending=False)
+
+            showb = bdf.copy()
+            showb["Faturamento"] = showb["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+            showb["% (sobre a linha)"] = showb["% (sobre a linha)"].apply(fmt_pct)
+            st.dataframe(showb, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Clientes")
+    if base_cur.empty or "CLIENTE" not in base_cur.columns:
+        st.info("Coluna CLIENTE não encontrada ou sem dados.")
+    else:
+        cdf = (base_cur.groupby("CLIENTE", dropna=False)["_receita"].sum()
+               .reset_index().rename(columns={"_receita": "Faturamento"}))
+        cdf["CLIENTE"] = cdf["CLIENTE"].fillna("—").astype(str).str.strip().replace({"": "—"})
+        totc = float(cdf["Faturamento"].sum())
+        cdf["%"] = (cdf["Faturamento"] / totc * 100.0) if totc != 0 else 0.0
+        cdf = cdf.sort_values("Faturamento", ascending=False)
+
+        topc = cdf.head(20).copy()
+        showc = topc.copy()
+        showc["Faturamento"] = showc["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+        showc["%"] = showc["%"].apply(fmt_pct)
+        st.dataframe(showc, use_container_width=True, hide_index=True)
+
+        with st.expander("Ver todos os clientes", expanded=False):
+            show_all_c = cdf.copy()
+            show_all_c["Faturamento"] = show_all_c["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+            show_all_c["%"] = show_all_c["%"].apply(fmt_pct)
+            st.dataframe(show_all_c, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Drill — Linhas e Marcas do Cliente")
+        cliente_sel = st.selectbox("Selecione o cliente", options=cdf["CLIENTE"].tolist(), index=0, key="cliente_sel")
+        base_c = base_cur[base_cur["CLIENTE"].fillna("—").astype(str).str.strip().replace({"": "—"}) == cliente_sel].copy()
+        if base_c.empty:
+            st.info("Sem dados para o cliente selecionado.")
+        else:
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("**Linhas compradas**")
+                if "LINHA" in base_c.columns:
+                    lc = (base_c.groupby("LINHA", dropna=False)["_receita"].sum()
+                          .reset_index().rename(columns={"_receita": "Faturamento"}))
+                    lc["LINHA"] = lc["LINHA"].fillna("—").astype(str).str.strip().replace({"": "—"})
+                    totlc = float(lc["Faturamento"].sum())
+                    lc["%"] = (lc["Faturamento"] / totlc * 100.0) if totlc != 0 else 0.0
+                    lc = lc.sort_values("Faturamento", ascending=False)
+                    show_lc = lc.copy()
+                    show_lc["Faturamento"] = show_lc["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+                    show_lc["%"] = show_lc["%"].apply(fmt_pct)
+                    st.dataframe(show_lc, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Coluna LINHA não encontrada.")
+
+            with col2:
+                st.markdown("**Marcas compradas**")
+                if "MARCA" in base_c.columns:
+                    mc = (base_c.groupby("MARCA", dropna=False)["_receita"].sum()
+                          .reset_index().rename(columns={"_receita": "Faturamento"}))
+                    mc["MARCA"] = mc["MARCA"].fillna("—").astype(str).str.strip().replace({"": "—"})
+                    totmc = float(mc["Faturamento"].sum())
+                    mc["%"] = (mc["Faturamento"] / totmc * 100.0) if totmc != 0 else 0.0
+                    mc = mc.sort_values("Faturamento", ascending=False)
+                    show_mc = mc.copy()
+                    show_mc["Faturamento"] = show_mc["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+                    show_mc["%"] = show_mc["%"].apply(fmt_pct)
+                    st.dataframe(show_mc, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Coluna MARCA não encontrada.")
