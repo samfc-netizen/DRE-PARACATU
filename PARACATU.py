@@ -973,6 +973,26 @@ else:
         show["%"] = show["%"].apply(fmt_pct)
         st.dataframe(show, use_container_width=True, hide_index=True)
 
+        st.markdown("#### Drill — Linhas dentro do Segmento")
+        seg_sel = st.selectbox("Selecione o segmento", options=seg["SEGMENTO"].tolist(), index=0, key="seg_sel")
+        seg_norm = base_cur["SEGMENTO"].fillna("—").astype(str).str.strip().replace({"": "—"})
+        base_s = base_cur[seg_norm == seg_sel].copy()
+
+        if base_s.empty or "LINHA" not in base_s.columns:
+            st.info("Sem dados para o segmento selecionado ou coluna LINHA ausente.")
+        else:
+            sdf = (base_s.groupby("LINHA", dropna=False)["_receita"].sum()
+                   .reset_index().rename(columns={"_receita": "Faturamento"}))
+            sdf["LINHA"] = sdf["LINHA"].fillna("—").astype(str).str.strip().replace({"": "—"})
+            tot_s = float(sdf["Faturamento"].sum())
+            sdf["% (sobre o segmento)"] = (sdf["Faturamento"] / tot_s * 100.0) if tot_s != 0 else 0.0
+            sdf = sdf.sort_values("Faturamento", ascending=False)
+
+            show_s = sdf.copy()
+            show_s["Faturamento"] = show_s["Faturamento"].apply(lambda x: f"R$ {format_brl(x)}")
+            show_s["% (sobre o segmento)"] = show_s["% (sobre o segmento)"].apply(fmt_pct)
+            st.dataframe(show_s, use_container_width=True, hide_index=True)
+
     st.divider()
     st.subheader("Marcas — Top 10")
     if base_cur.empty or "MARCA" not in base_cur.columns:
