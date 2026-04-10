@@ -412,7 +412,11 @@ def style_table(df: pd.DataFrame, meses_exib: List[int], highlight_rows: List[st
     base = df[cols_all + ["_type"]].copy()
     num_base = base.copy()
 
-    show = base[cols_all].copy()
+    # IMPORTANTE:
+    # as colunas de exibição precisam estar como object antes de receber strings
+    # como "R$ 1.234,56" ou "12,34%". Em pandas mais novos, escrever string
+    # em coluna float/int gera TypeError: Invalid value for dtype.
+    show = base[cols_all].copy().astype(object)
 
     for i in show.index:
         typ = str(base.loc[i, "_type"])
@@ -420,18 +424,18 @@ def style_table(df: pd.DataFrame, meses_exib: List[int], highlight_rows: List[st
             v = num_base.loc[i, c]
             if typ == "ratio":
                 try:
-                    show.loc[i, c] = f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    show.at[i, c] = f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 except Exception:
-                    show.loc[i, c] = "0,00"
+                    show.at[i, c] = "0,00"
             else:
-                show.loc[i, c] = f"R$ {format_brl(v)}"
+                show.at[i, c] = f"R$ {format_brl(v)}"
 
         for c in cols_pct:
             v = num_base.loc[i, c]
             if typ == "ratio":
-                show.loc[i, c] = "—"
+                show.at[i, c] = "—"
             else:
-                show.loc[i, c] = "—" if pd.isna(v) else fmt_pct(v)
+                show.at[i, c] = "—" if pd.isna(v) else fmt_pct(v)
 
     sty = show.style
 
