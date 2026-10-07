@@ -145,8 +145,80 @@ def read_sheet(excel_path: str, sheet_name: str, sig: Tuple[int, int]) -> Option
     return df
 
 
+def _norm_item_code(v) -> str:
+    """Normaliza código do item para cruzamento entre RECEITA E CMV e Fornecedor."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    s = str(v).strip()
+    if re.fullmatch(r"\d+\.0", s):
+        s = s[:-2]
+    return s.lstrip("0") or "0"
+
+
+def _find_item_col(df: pd.DataFrame) -> Optional[str]:
+    """Localiza a coluna de código do item tolerando variações de cabeçalho."""
+    aliases = {
+        "CODITEM", "CODITEMPRODUTO", "CODPRODUTO", "CODIGOITEM",
+        "CODIGODOPRODUTO", "CODIGO", "ITEM", "CODITEMVENDA"
+    }
+    for c in df.columns:
+        n = unicodedata.normalize("NFKD", str(c).upper())
+        n = "".join(ch for ch in n if not unicodedata.combining(ch))
+        n = re.sub(r"[^A-Z0-9]", "", n)
+        if n in aliases:
+            return c
+    return None
+
+
 @st.cache_data(show_spinner=False)
-def prep_receita_cmv(excel_path: str, sig: Tuple[int, int]) -> Optional[pd.DataFrame]:
+def prep_fornecedor(excel_path: str, sig: Tuple[int, int]) -> Optional[pd.DataFrame]:
+    """Lê a aba Fornecedor e cria o cadastro mestre comercial por produto."""
+    df = read_sheet(excel_path, "Fornecedor", sig)
+    if df is None or df.empty:
+        return None
+
+    f = df.copy()
+    item_col = _find_item_col(f)
+    if item_col is None:
+        item_col = f.columns[0] if len(f.columns) else None
+    if item_col is None or len(f.columns) < 10:
+        return None
+
+    # Regras solicitadas pela posição das colunas na aba Fornecedor:
+    # F = Marca; I = número Linha/Grupo; J = nome Linha/Grupo.
+    marca_col = f.columns[5]
+    linha_num_col = f.columns[8]
+    linha_nome_col = f.columns[9]
+
+    cad = pd.DataFrame({
+        "_item_key": f[item_col].apply(_norm_item_code),
+        "MARCA_FORN": f[marca_col].fillna("—").astype(str).str.strip(),
+        "LINHA_NUM_FORN": f[linha_num_col].fillna("").astype(str).str.strip(),
+        "LINHA_FORN": f[linha_nome_col].fillna("—").astype(str).str.strip(),
+    })
+
+    def _segmento(v):
+        s = re.sub(r"\D", "", str(v))
+        # Excel pode retirar os zeros à esquerda (ex.: 001026 -> 1026).
+        # A família é determinada pelo primeiro dígito significativo.
+        s = s.lstrip("0")
+        if not s:
+            return "—"
+        return {
+            "1": "Automotivo",
+            "2": "Decorativo",
+            "3": "Industrial",
+            "4": "Moveleira",
+            "5": "Thinner",
+        }.get(s[0], "—")
+
+    cad["SEGMENTO_FORN"] = cad["LINHA_NUM_FORN"].apply(_segmento)
+    cad = cad[cad["_item_key"] != ""].drop_duplicates("_item_key", keep="last")
+    return cad
+
+
+@st.cache_data(show_spinner=False)
+def prep_receita_cmv(excel_path: str, sig: Tuple[int, int], df_forn: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
     df = read_sheet(excel_path, "RECEITA E CMV", sig)
     if df is None:
         return None
@@ -157,6 +229,18 @@ def prep_receita_cmv(excel_path: str, sig: Tuple[int, int]) -> Optional[pd.DataF
     r["_mes"] = r["_dt"].dt.month
     r["_receita"] = r.get("VR.TOTAL").apply(to_num) if "VR.TOTAL" in r.columns else 0.0
     r["_cmv"] = r.get("CUSTO").apply(to_num) if "CUSTO" in r.columns else 0.0
+
+    # Marca, Linha/Grupo e Segmento passam a vir do cadastro mestre Fornecedor.
+    if df_forn is not None and not df_forn.empty:
+        item_col = _find_item_col(r)
+        if item_col is not None:
+            r["_item_key"] = r[item_col].apply(_norm_item_code)
+            r = r.merge(df_forn, on="_item_key", how="left")
+            r["MARCA"] = r["MARCA_FORN"].fillna("—")
+            r["LINHA"] = r["LINHA_FORN"].fillna("—")
+            r["SEGMENTO"] = r["SEGMENTO_FORN"].fillna("—")
+            r["LINHA/GRUPO Nº"] = r["LINHA_NUM_FORN"].fillna("")
+            r.drop(columns=["MARCA_FORN", "LINHA_FORN", "SEGMENTO_FORN", "LINHA_NUM_FORN"], inplace=True, errors="ignore")
 
     # normaliza texto das colunas comerciais se existirem
     for c in ["CLIENTE", "SEGMENTO", "MARCA", "LINHA", "VENDEDOR", "CIDADE"]:
@@ -470,7 +554,8 @@ if not excel_path:
 
 sig = excel_signature(excel_path)
 
-df_rcm = prep_receita_cmv(excel_path, sig)
+df_forn = prep_fornecedor(excel_path, sig)
+df_rcm = prep_receita_cmv(excel_path, sig, df_forn)
 df_dre = prep_dre_lancamentos(excel_path, sig)
 df_rec = prep_recebimentos(excel_path, sig)
 df_comp = prep_compras_fornecedor(excel_path, sig)
@@ -482,6 +567,9 @@ if df_rcm is None or df_dre is None or df_rec is None:
     if df_rec is None: faltas.append("RECEBIMENTOS")
     st.error(f"Falha ao ler abas obrigatórias: {', '.join(faltas)}")
     st.stop()
+
+if df_forn is None:
+    st.warning("A aba 'Fornecedor' não foi encontrada ou não pôde ser lida. Marca, Linha/Grupo e Segmento não poderão ser classificados pelo cadastro de produtos.")
 
 # Sidebar
 st.sidebar.title("Filtros")
