@@ -1249,17 +1249,36 @@ else:
             st.dataframe(show_s, use_container_width=True, hide_index=True)
 
             st.markdown("#### Produtos do segmento")
+            # O código já é normalizado em _item_key durante o cruzamento com Fornecedor.
+            # Usamos essa chave como fonte principal/fallback para não depender do nome
+            # exato do cabeçalho da planilha de vendas.
             item_col = _find_item_col(base_s)
-            desc_candidates = ["DESCRIÇÃO", "DESCRICAO", "DESC. ITEM", "DESC ITEM", "DESCRIÇÃO ITEM", "DESCRICAO ITEM", "PRODUTO", "ITEM DESCRIÇÃO", "ITEM DESCRICAO"]
-            qtd_candidates = ["QTD", "QTDE", "QUANTIDADE", "QTD.VENDA", "QTD VENDA", "QUANT. VENDA", "QUANTIDADE VENDIDA"]
-            desc_col = next((c for c in desc_candidates if c in base_s.columns), None)
-            qtd_col = next((c for c in qtd_candidates if c in base_s.columns), None)
+            code_source = item_col if item_col is not None else ("_item_key" if "_item_key" in base_s.columns else None)
 
-            if item_col is None:
-                st.info("Não encontrei a coluna de código do produto para montar o detalhamento.")
+            def _find_col_flex(df, aliases):
+                aliases_norm = set()
+                for a in aliases:
+                    n = unicodedata.normalize("NFKD", str(a).upper())
+                    n = "".join(ch for ch in n if not unicodedata.combining(ch))
+                    aliases_norm.add(re.sub(r"[^A-Z0-9]", "", n))
+                for c in df.columns:
+                    n = unicodedata.normalize("NFKD", str(c).upper())
+                    n = "".join(ch for ch in n if not unicodedata.combining(ch))
+                    n = re.sub(r"[^A-Z0-9]", "", n)
+                    if n in aliases_norm:
+                        return c
+                return None
+
+            desc_candidates = ["DESCRIÇÃO", "DESCRICAO", "DESC. ITEM", "DESC ITEM", "DESCRIÇÃO ITEM", "DESCRICAO ITEM", "PRODUTO", "ITEM DESCRIÇÃO", "ITEM DESCRICAO", "DESC.PRODUTO", "DESC PRODUTO", "NOME PRODUTO"]
+            qtd_candidates = ["QTD", "QTDE", "QUANTIDADE", "QUANT.", "QUANT", "QTD.VENDA", "QTD VENDA", "QUANT. VENDA", "QUANTIDADE VENDIDA", "QTDE VENDIDA"]
+            desc_col = _find_col_flex(base_s, desc_candidates)
+            qtd_col = _find_col_flex(base_s, qtd_candidates)
+
+            if code_source is None:
+                st.info("Não encontrei o código do produto na base de vendas nem na chave de cruzamento com Fornecedor.")
             else:
                 prod = base_s.copy()
-                prod["_CODIGO"] = prod[item_col].apply(_norm_item_code)
+                prod["_CODIGO"] = prod[code_source].apply(_norm_item_code)
                 prod["_DESCRICAO"] = prod[desc_col].fillna("—").astype(str).str.strip() if desc_col else "—"
                 prod["_QTD"] = prod[qtd_col].apply(to_num) if qtd_col else 0.0
                 produtos = (prod.groupby(["_CODIGO", "_DESCRICAO"], dropna=False)
