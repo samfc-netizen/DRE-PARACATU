@@ -170,10 +170,35 @@ def _find_item_col(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
+def _auto_find_fornecedor() -> Optional[str]:
+    """Localiza o arquivo externo de cadastro de fornecedores/produtos no diretório do app."""
+    preferred = [
+        "Fornecedor.xlsx", "FORNECEDOR.xlsx", "fornecedor.xlsx",
+        "Fornecedores.xlsx", "FORNECEDORES.xlsx", "fornecedores.xlsx",
+    ]
+    for fn in preferred:
+        if os.path.exists(fn) and os.path.isfile(fn):
+            return fn
+
+    candidatos = []
+    for pat in ["*.xlsx", "*.xlsm", "*.xls"]:
+        candidatos.extend(glob.glob(pat))
+    for fpath in candidatos:
+        nome = os.path.basename(fpath).upper()
+        if "FORNECEDOR" in nome and os.path.isfile(fpath):
+            return fpath
+    return None
+
+
 @st.cache_data(show_spinner=False)
-def prep_fornecedor(excel_path: str, sig: Tuple[int, int]) -> Optional[pd.DataFrame]:
-    """Lê a aba Fornecedor e cria o cadastro mestre comercial por produto."""
-    df = read_sheet(excel_path, "Fornecedor", sig)
+def prep_fornecedor(fornecedor_path: str, sig: Tuple[int, int]) -> Optional[pd.DataFrame]:
+    """Lê o arquivo externo Fornecedor.xlsx e cria o cadastro mestre comercial por produto."""
+    try:
+        # O cadastro enviado é um arquivo separado. Lemos a primeira aba do arquivo.
+        df = pd.read_excel(fornecedor_path, sheet_name=0)
+        df.columns = [str(c).strip() for c in df.columns]
+    except Exception:
+        return None
     if df is None or df.empty:
         return None
 
@@ -554,7 +579,14 @@ if not excel_path:
 
 sig = excel_signature(excel_path)
 
-df_forn = prep_fornecedor(excel_path, sig)
+# O cadastro de produtos fica em um arquivo separado no mesmo diretório/GitHub.
+fornecedor_path = _auto_find_fornecedor()
+if fornecedor_path:
+    fornecedor_sig = excel_signature(fornecedor_path)
+    df_forn = prep_fornecedor(fornecedor_path, fornecedor_sig)
+else:
+    df_forn = None
+
 df_rcm = prep_receita_cmv(excel_path, sig, df_forn)
 df_dre = prep_dre_lancamentos(excel_path, sig)
 df_rec = prep_recebimentos(excel_path, sig)
@@ -569,7 +601,7 @@ if df_rcm is None or df_dre is None or df_rec is None:
     st.stop()
 
 if df_forn is None:
-    st.warning("A aba 'Fornecedor' não foi encontrada ou não pôde ser lida. Marca, Linha/Grupo e Segmento não poderão ser classificados pelo cadastro de produtos.")
+    st.warning("O arquivo 'Fornecedor.xlsx' não foi encontrado ou não pôde ser lido. Confirme que ele está na raiz do GitHub, junto do PARACATU.py.")
 
 # Sidebar
 st.sidebar.title("Filtros")
