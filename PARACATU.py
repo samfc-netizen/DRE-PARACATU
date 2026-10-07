@@ -159,7 +159,7 @@ def _find_item_col(df: pd.DataFrame) -> Optional[str]:
     """Localiza a coluna de código do item tolerando variações de cabeçalho."""
     aliases = {
         "CODITEM", "CODITEMPRODUTO", "CODPRODUTO", "CODIGOITEM",
-        "CODIGODOPRODUTO", "CODIGO", "ITEM", "CODITEMVENDA"
+        "CODIGODOPRODUTO", "CODIGO", "COD", "ITEM", "CODITEMVENDA"
     }
     for c in df.columns:
         n = unicodedata.normalize("NFKD", str(c).upper())
@@ -1273,11 +1273,11 @@ else:
                 return None
 
             # Código: tenta cabeçalho original e, depois, a chave criada no cruzamento.
-            item_col = _find_item_col(base_s)
+            item_col = "CÓD" if "CÓD" in base_s.columns else _find_item_col(base_s)
             code_source = item_col if item_col is not None else ("_item_key" if "_item_key" in base_s.columns else None)
 
             # Descrição: busca ampla para suportar diferentes nomes exportados pelo Autcom.
-            desc_col = _find_col_contains(
+            desc_col = "DESCRIÇÃO" if "DESCRIÇÃO" in base_s.columns else _find_col_contains(
                 base_s,
                 exact_aliases=[
                     "DESCRIÇÃO", "DESCRICAO", "DESCRIÇÃO ITEM", "DESCRICAO ITEM",
@@ -1289,7 +1289,7 @@ else:
             )
 
             # Quantidade: também aceita variações de cabeçalho.
-            qtd_col = _find_col_contains(
+            qtd_col = "QTD" if "QTD" in base_s.columns else _find_col_contains(
                 base_s,
                 exact_aliases=[
                     "QTD", "QTDE", "QUANTIDADE", "QUANT", "QUANT.", "QTD VENDA",
