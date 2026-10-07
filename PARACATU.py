@@ -1249,52 +1249,125 @@ else:
             st.dataframe(show_s, use_container_width=True, hide_index=True)
 
             st.markdown("#### Produtos do segmento")
-            # O código já é normalizado em _item_key durante o cruzamento com Fornecedor.
-            # Usamos essa chave como fonte principal/fallback para não depender do nome
-            # exato do cabeçalho da planilha de vendas.
-            item_col = _find_item_col(base_s)
-            code_source = item_col if item_col is not None else ("_item_key" if "_item_key" in base_s.columns else None)
 
-            def _find_col_flex(df, aliases):
-                aliases_norm = set()
-                for a in aliases:
-                    n = unicodedata.normalize("NFKD", str(a).upper())
-                    n = "".join(ch for ch in n if not unicodedata.combining(ch))
-                    aliases_norm.add(re.sub(r"[^A-Z0-9]", "", n))
+            # O drill de produtos NÃO depende mais da existência de uma coluna de código.
+            # A descrição do produto é a chave principal de exibição; o código é complementar.
+            def _norm_header(v):
+                n = unicodedata.normalize("NFKD", str(v).upper())
+                n = "".join(ch for ch in n if not unicodedata.combining(ch))
+                return re.sub(r"[^A-Z0-9]", "", n)
+
+            def _find_col_contains(df, exact_aliases=None, contains_aliases=None):
+                exact_aliases = exact_aliases or []
+                contains_aliases = contains_aliases or []
+                exact = {_norm_header(x) for x in exact_aliases}
+                contains = [_norm_header(x) for x in contains_aliases]
                 for c in df.columns:
-                    n = unicodedata.normalize("NFKD", str(c).upper())
-                    n = "".join(ch for ch in n if not unicodedata.combining(ch))
-                    n = re.sub(r"[^A-Z0-9]", "", n)
-                    if n in aliases_norm:
+                    nc = _norm_header(c)
+                    if nc in exact:
+                        return c
+                for c in df.columns:
+                    nc = _norm_header(c)
+                    if any(a and a in nc for a in contains):
                         return c
                 return None
 
-            desc_candidates = ["DESCRIÇÃO", "DESCRICAO", "DESC. ITEM", "DESC ITEM", "DESCRIÇÃO ITEM", "DESCRICAO ITEM", "PRODUTO", "ITEM DESCRIÇÃO", "ITEM DESCRICAO", "DESC.PRODUTO", "DESC PRODUTO", "NOME PRODUTO"]
-            qtd_candidates = ["QTD", "QTDE", "QUANTIDADE", "QUANT.", "QUANT", "QTD.VENDA", "QTD VENDA", "QUANT. VENDA", "QUANTIDADE VENDIDA", "QTDE VENDIDA"]
-            desc_col = _find_col_flex(base_s, desc_candidates)
-            qtd_col = _find_col_flex(base_s, qtd_candidates)
+            # Código: tenta cabeçalho original e, depois, a chave criada no cruzamento.
+            item_col = _find_item_col(base_s)
+            code_source = item_col if item_col is not None else ("_item_key" if "_item_key" in base_s.columns else None)
 
-            if code_source is None:
-                st.info("Não encontrei o código do produto na base de vendas nem na chave de cruzamento com Fornecedor.")
+            # Descrição: busca ampla para suportar diferentes nomes exportados pelo Autcom.
+            desc_col = _find_col_contains(
+                base_s,
+                exact_aliases=[
+                    "DESCRIÇÃO", "DESCRICAO", "DESCRIÇÃO ITEM", "DESCRICAO ITEM",
+                    "DESC ITEM", "DESC. ITEM", "DESCRIÇÃO PRODUTO", "DESCRICAO PRODUTO",
+                    "DESC PRODUTO", "DESC. PRODUTO", "PRODUTO", "NOME PRODUTO",
+                    "NOME DO PRODUTO", "DESCRIÇÃO DO PRODUTO", "DESCRICAO DO PRODUTO"
+                ],
+                contains_aliases=["DESCRICAOITEM", "DESCRICAOPRODUTO", "DESCPRODUTO", "DESCITEM"]
+            )
+
+            # Quantidade: também aceita variações de cabeçalho.
+            qtd_col = _find_col_contains(
+                base_s,
+                exact_aliases=[
+                    "QTD", "QTDE", "QUANTIDADE", "QUANT", "QUANT.", "QTD VENDA",
+                    "QTD.VENDA", "QTDE VENDA", "QUANTIDADE VENDIDA", "QTDE VENDIDA",
+                    "QUANT VENDIDA", "QTD FATURADA", "QUANTIDADE FATURADA"
+                ],
+                contains_aliases=["QTDVENDA", "QTDEVENDA", "QUANTIDADEVENDIDA", "QTDFATURADA"]
+            )
+
+            prod = base_s.copy()
+
+            # Código deixa de ser requisito para o produto aparecer.
+            if code_source is not None:
+                prod["_CODIGO_PROD"] = prod[code_source].apply(_norm_item_code).replace({"": "—"})
             else:
-                prod = base_s.copy()
-                prod["_CODIGO"] = prod[code_source].apply(_norm_item_code)
-                prod["_DESCRICAO"] = prod[desc_col].fillna("—").astype(str).str.strip() if desc_col else "—"
-                prod["_QTD"] = prod[qtd_col].apply(to_num) if qtd_col else 0.0
-                produtos = (prod.groupby(["_CODIGO", "_DESCRICAO"], dropna=False)
-                            .agg(**{"Qtd. vendida": ("_QTD", "sum"), "Valor faturado": ("_receita", "sum")})
-                            .reset_index()
-                            .rename(columns={"_CODIGO": "Código", "_DESCRICAO": "Descrição"})
-                            .sort_values("Valor faturado", ascending=False))
+                prod["_CODIGO_PROD"] = "—"
+
+            if desc_col is not None:
+                prod["_DESCRICAO_PROD"] = (
+                    prod[desc_col].fillna("Não informado").astype(str).str.strip()
+                    .replace({"": "Não informado", "nan": "Não informado", "None": "Não informado"})
+                )
+            elif code_source is not None:
+                # Mesmo sem descrição, não bloqueia o drill.
+                prod["_DESCRICAO_PROD"] = prod["_CODIGO_PROD"].apply(
+                    lambda x: f"Produto cód. {x}" if x != "—" else "Produto não identificado"
+                )
+            else:
+                # Último fallback: usa a linha/grupo para não esconder as vendas do segmento.
+                prod["_DESCRICAO_PROD"] = (
+                    prod["LINHA"].fillna("Produto não identificado").astype(str).str.strip()
+                    if "LINHA" in prod.columns else "Produto não identificado"
+                )
+
+            prod["_QTD_PROD"] = prod[qtd_col].apply(to_num) if qtd_col is not None else 0.0
+
+            produtos = (
+                prod.groupby(["_CODIGO_PROD", "_DESCRICAO_PROD"], dropna=False)
+                .agg(**{
+                    "Qtd. vendida": ("_QTD_PROD", "sum"),
+                    "Valor faturado": ("_receita", "sum"),
+                })
+                .reset_index()
+                .rename(columns={
+                    "_CODIGO_PROD": "Código",
+                    "_DESCRICAO_PROD": "Descrição",
+                })
+                .sort_values("Valor faturado", ascending=False)
+            )
+
+            if produtos.empty:
+                st.info("Não há vendas para exibir no segmento selecionado.")
+            else:
+                total_prod = float(produtos["Valor faturado"].sum())
+                produtos["% do segmento"] = (
+                    produtos["Valor faturado"] / total_prod * 100.0 if total_prod != 0 else 0.0
+                )
+
                 show_prod = produtos.copy()
-                show_prod["Qtd. vendida"] = show_prod["Qtd. vendida"].apply(lambda x: format_brl(x))
+                if qtd_col is not None:
+                    show_prod["Qtd. vendida"] = show_prod["Qtd. vendida"].apply(
+                        lambda x: f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    )
+                else:
+                    show_prod["Qtd. vendida"] = "—"
                 show_prod["Valor faturado"] = show_prod["Valor faturado"].apply(lambda x: f"R$ {format_brl(x)}")
+                show_prod["% do segmento"] = show_prod["% do segmento"].apply(fmt_pct)
                 st.dataframe(show_prod, use_container_width=True, hide_index=True)
-                if desc_col is None or qtd_col is None:
+
+                if code_source is None or desc_col is None or qtd_col is None:
                     falt = []
+                    if code_source is None: falt.append("código")
                     if desc_col is None: falt.append("descrição")
                     if qtd_col is None: falt.append("quantidade")
-                    st.caption("Atenção: não foi localizada coluna de " + " e ".join(falt) + " na base; o painel mantém o produto visível com os campos disponíveis.")
+                    st.caption(
+                        "Campos não identificados automaticamente: " + ", ".join(falt) +
+                        ". O faturamento dos produtos continua sendo exibido com as informações disponíveis."
+                    )
 
     st.divider()
     section_title("Marcas — Top 10")
