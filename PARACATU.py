@@ -405,6 +405,8 @@ def make_dre_table(
     inv_by_month = {m: 0.0 for m in range(1, 13)}
     fin_by_month = {m: 0.0 for m in range(1, 13)}
     for nome, by_m, prefix in despesas_map_by_month:
+        if prefix == "00026":  # Outras Receitas: somente informativo
+            continue
         for m in range(1, 13):
             desp_total_by_month[m] += float(by_m.get(m, 0.0))
             if prefix == "00022":
@@ -469,6 +471,8 @@ def make_dfc_table(
     inv_by_month = {m: 0.0 for m in range(1, 13)}
     fin_by_month = {m: 0.0 for m in range(1, 13)}
     for nome, by_m, prefix in saidas_map_by_month:
+        if prefix == "00026":  # Outras Receitas: somente informativo
+            continue
         for m in range(1, 13):
             saidas_total[m] += float(by_m.get(m, 0.0))
             if prefix == "00022":
@@ -697,6 +701,7 @@ if pagina == "DRE":
     cmv_by_month = month_series(df_rcm, "_cmv", int(ano_ref), meses_exib)
 
     contas_dre = [
+        ("OUTRAS RECEITAS (INFORMATIVO)", "00026"),
         ("DESPESAS COM PESSOAL", "00024"),
         ("DESPESAS ADMINISTRATIVAS", "00019"),
         ("DESPESAS OPERACIONAIS", "00018"),
@@ -838,7 +843,7 @@ if pagina == "DRE":
                 show3["% Receita"] = show3["% Receita"].apply(fmt_pct)
                 st.dataframe(show3, use_container_width=True, hide_index=True)
     else:
-        st.info("Para detalhar (DESPESA/HISTÓRICO/FAVORECIDO), selecione uma linha de despesa (00018..00024).")
+        st.info("Para detalhar (DESPESA/HISTÓRICO/FAVORECIDO), selecione uma linha de conta (00018..00024 ou 00026).")
 
 
 # =========================
@@ -850,6 +855,7 @@ elif pagina == "DFC":
     receb_by_month = month_series(df_rec, "_v", int(ano_ref), meses_exib)
 
     contas_dfc = [
+        ("OUTRAS RECEITAS (INFORMATIVO)", "00026"),
         ("FORNECEDORES (COMPRAS P/ REVENDA)", "00025"),
         ("DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", "00021"),
         ("DESPESAS COM PESSOAL", "00024"),
@@ -961,7 +967,7 @@ elif pagina == "DFC":
                 show3["% Recebimentos"] = show3["% Recebimentos"].apply(fmt_pct)
                 st.dataframe(show3, use_container_width=True, hide_index=True)
     else:
-        st.info("Para detalhar (DESPESA/HISTÓRICO/FAVORECIDO), selecione uma linha de saída (00018..00025).")
+        st.info("Para detalhar (DESPESA/HISTÓRICO/FAVORECIDO), selecione uma linha de conta (00018..00026).")
 
 
 # =========================
